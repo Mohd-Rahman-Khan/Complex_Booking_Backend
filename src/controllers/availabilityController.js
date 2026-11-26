@@ -9,13 +9,13 @@ const {
   isValidDate,
   isDateUnavailable,
   isBookingWindowValid,
-  getActiveIntervals,
-  isRangeCovered,
   hasBookingOverlap,
   getCurrentMinutes,
 } = require("../utils/availabilityUtils");
 
 const { calculateBookingPrice } = require("../utils/pricingUtils");
+
+const SLOT_INTERVAL = 60;
 
 exports.getAvailability = async (req, res) => {
   try {
@@ -70,7 +70,7 @@ exports.getAvailability = async (req, res) => {
       });
     }
 
-    // 5. Find embedded sport
+    // 5. Find selected sport
     const sport = complex.sports.id(sportId);
 
     if (!sport || !sport.isActive) {
@@ -80,15 +80,66 @@ exports.getAvailability = async (req, res) => {
       });
     }
 
-    // 6. Validate booking window
+    // 6. Fetch actual confirmed bookings from MongoDB
+    // Do not depend on configured sport slots.
+    const bookings = await Booking.find({
+      complexId,
+      sportId,
+      bookingDate: date,
+      status: "confirmed",
+    })
+      .select("_id bookingDate startTime endTime durationMinutes status")
+      .sort({ startTime: 1 })
+      .lean();
+
+    // 7. Normalize booked slots
+    const bookedSlots = bookings.map((booking) => {
+      const startMinutes = timeToMinutes(booking.startTime);
+      const endMinutes = timeToMinutes(booking.endTime);
+
+      if (
+        !Number.isFinite(startMinutes) ||
+        !Number.isFinite(endMinutes) ||
+        startMinutes < 0 ||
+        endMinutes > 1440 ||
+        endMinutes <= startMinutes
+      ) {
+        throw new Error("Invalid stored booking timings");
+      }
+
+      return {
+        _id: booking._id,
+        complexId,
+        sportId,
+        bookingDate: booking.bookingDate,
+        startTime: booking.startTime,
+        endTime: booking.endTime,
+        startMinutes,
+        endMinutes,
+        durationMinutes: endMinutes - startMinutes,
+        status: booking.status,
+      };
+    });
+
+    bookedSlots.sort((a, b) => a.startMinutes - b.startMinutes);
+
+    // 8. Check booking window
     if (!isBookingWindowValid(date, sport.bookingWindowDays)) {
-      return res.status(400).json({
-        success: false,
+      return res.status(200).json({
+        success: true,
+        date,
+        durationMinutes,
         message: `Bookings are allowed only within ${sport.bookingWindowDays} days`,
+        data: {
+          isBookable: false,
+          availableSlots: [],
+          bookedSlots,
+          totalBooked: bookedSlots.length,
+        },
       });
     }
 
-    // 7. Check complex unavailable dates
+    // 9. Check unavailable dates
     if (isDateUnavailable(complex, date)) {
       return res.status(200).json({
         success: true,
@@ -96,49 +147,32 @@ exports.getAvailability = async (req, res) => {
         durationMinutes,
         message: "Complex is unavailable on this date",
         data: {
+          isBookable: false,
           availableSlots: [],
-          bookedSlots: [],
+          bookedSlots,
+          totalBooked: bookedSlots.length,
         },
       });
     }
 
-    // 8. Validate complex operating hours
+    // 10. Complex operating hours
     const opening = timeToMinutes(complex.openingTime);
     const closing = timeToMinutes(complex.closingTime);
 
-    if (opening === null || closing === null || closing <= opening) {
+    if (
+      !Number.isFinite(opening) ||
+      !Number.isFinite(closing) ||
+      opening < 0 ||
+      closing > 1440 ||
+      closing <= opening
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid complex opening or closing time",
       });
     }
 
-    // 9. Get active sport slots
-    const intervals = getActiveIntervals(sport);
-
-    if (!intervals.length) {
-      return res.status(200).json({
-        success: true,
-        date,
-        durationMinutes,
-        data: {
-          availableSlots: [],
-          bookedSlots: [],
-        },
-      });
-    }
-
-    // 10. Fetch existing bookings
-    const bookings = await Booking.find({
-      complexId,
-      sportId,
-      bookingDate: date,
-      status: {
-        $in: ["pending", "confirmed"],
-      },
-    }).select("startTime endTime durationMinutes status bookingNumber");
-
-    // 11. Get today's date
+    // 11. Today's date
     const today = new Date();
 
     const todayString = [
@@ -149,43 +183,46 @@ exports.getAvailability = async (req, res) => {
 
     const currentMinutes = date === todayString ? getCurrentMinutes() : null;
 
-    // 12. Generate available booking options
-    const availableSlots = [];
-    const addedStarts = new Set();
+    if (date < todayString) {
+      return res.status(200).json({
+        success: true,
+        date,
+        durationMinutes,
+        message: "Past dates are not available for booking",
+        data: {
+          isBookable: false,
+          availableSlots: [],
+          bookedSlots,
+          totalBooked: bookedSlots.length,
+        },
+      });
+    }
 
-    for (const interval of intervals) {
-      const start = interval.start;
+    // 12. Generate dynamic available slots
+    const availableSlots = [];
+
+    for (
+      let start = opening;
+      start + durationMinutes <= closing;
+      start += SLOT_INTERVAL
+    ) {
       const end = start + durationMinutes;
 
-      // Avoid duplicate start times
-      if (addedStarts.has(start)) {
-        continue;
-      }
-
-      addedStarts.add(start);
-
-      // Check complex operating hours
-      if (start < opening || end > closing) {
-        continue;
-      }
-
-      // Check whether requested duration is covered
-      // by active configured slots.
-      if (!isRangeCovered(intervals, start, end)) {
-        continue;
-      }
-
-      // Prevent past-time bookings
+      // Prevent past-time booking
       if (currentMinutes !== null && start <= currentMinutes) {
         continue;
       }
 
-      // Check booking overlap
-      if (hasBookingOverlap(start, end, bookings)) {
+      // Prevent booking overlap
+      const isBooked = bookedSlots.some(
+        (booking) => start < booking.endMinutes && end > booking.startMinutes,
+      );
+
+      if (isBooked) {
         continue;
       }
 
-      // Calculate price
+      // Calculate dynamic price
       let price;
 
       try {
@@ -204,29 +241,30 @@ exports.getAvailability = async (req, res) => {
       availableSlots.push({
         startTime: minutesToTime(start),
         endTime: minutesToTime(end),
+        startMinutes: start,
+        endMinutes: end,
         durationMinutes,
         price,
+        status: "available",
       });
     }
 
-    // Sort available options by start time
-    availableSlots.sort(
-      (a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime),
-    );
-
-    // 13. Response
+    // 13. Return availability and actual booked slots
     return res.status(200).json({
       success: true,
+      message: "Availability fetched successfully",
       date,
       durationMinutes,
       data: {
+        complexId,
+        sportId,
+        openingTime: complex.openingTime,
+        closingTime: complex.closingTime,
+        isBookable: true,
+        totalAvailable: availableSlots.length,
+        totalBooked: bookedSlots.length,
         availableSlots,
-        bookedSlots: bookings.map((booking) => ({
-          bookingNumber: booking.bookingNumber,
-          startTime: booking.startTime,
-          endTime: booking.endTime,
-          status: booking.status,
-        })),
+        bookedSlots,
       },
     });
   } catch (error) {

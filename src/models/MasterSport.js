@@ -16,6 +16,11 @@ const masterSportSchema = new mongoose.Schema(
       trim: true,
     },
 
+    image: {
+      type: String,
+      default: "",
+    },
+
     icon: {
       type: String,
       default: "",

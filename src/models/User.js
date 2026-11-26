@@ -30,9 +30,15 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
-      enum: ["customer", "complex_admin", "sport_admin"],
+      enum: ["customer", "complex_admin", "sport_admin", "coach"],
       default: "customer",
       required: true,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
     },
     complexId: {
       type: mongoose.Schema.Types.ObjectId,

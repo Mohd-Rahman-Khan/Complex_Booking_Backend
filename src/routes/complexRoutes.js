@@ -2,39 +2,64 @@ const express = require("express");
 
 const router = express.Router();
 
+const complexController = require("../controllers/complexController");
+
 const authMiddleware = require("../middleware/authMiddleware");
-const allowRoles = require("../middleware/roleMiddleware");
 
-const {
-  createComplex,
-  getAllComplexes,
-  getMyComplexes,
-  getComplexById,
-  updateComplex,
-  updateComplexStatus,
-  addUnavailableDates,
-  removeUnavailableDates,
-} = require("../controllers/complexController");
+const { uploadComplexImage } = require("../middleware/uploadMiddleware");
 
-// Public APIs
-router.get("/", getAllComplexes);
+// ==========================================
+// PUBLIC ROUTES
+// ==========================================
 
-router.get("/my", authMiddleware, allowRoles("complex_admin"), getMyComplexes);
+// Get all active complexes
+router.get("/", complexController.getAllComplexes);
 
-router.get("/:id", getComplexById);
+// ==========================================
+// ADMIN ROUTES
+// ==========================================
 
-// All routes below require Complex Admin authentication
-router.use(authMiddleware);
-router.use(allowRoles("complex_admin"));
+// Get logged-in admin complexes
+router.get("/my", authMiddleware, complexController.getMyComplexes);
 
-router.post("/", createComplex);
+// Create complex with image
+router.post(
+  "/",
+  authMiddleware,
+  uploadComplexImage,
+  complexController.createComplex,
+);
 
-router.put("/:id", updateComplex);
+// Update complex with optional image
+router.put(
+  "/:id",
+  authMiddleware,
+  uploadComplexImage,
+  complexController.updateComplex,
+);
 
-router.patch("/:id/status", updateComplexStatus);
+// Activate / deactivate complex
+router.patch(
+  "/:id/status",
+  authMiddleware,
+  complexController.updateComplexStatus,
+);
 
-router.post("/:id/unavailable-dates", addUnavailableDates);
+// Add unavailable dates
+router.post(
+  "/:id/unavailable-dates",
+  authMiddleware,
+  complexController.addUnavailableDates,
+);
 
-router.delete("/:id/unavailable-dates/:rangeId", removeUnavailableDates);
+// Remove unavailable dates
+router.delete(
+  "/:id/unavailable-dates/:rangeId",
+  authMiddleware,
+  complexController.removeUnavailableDates,
+);
+
+// Get single active complex
+router.get("/:id", complexController.getComplexById);
 
 module.exports = router;

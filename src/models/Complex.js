@@ -41,6 +41,12 @@ const sportSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    coachIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Coach",
+      },
+    ],
 
     bookingWindowDays: { type: Number, default: 30 },
 
@@ -75,6 +81,10 @@ const complexSchema = new mongoose.Schema(
 
     openingTime: { type: String, default: "06:00" },
     closingTime: { type: String, default: "23:00" },
+    image: {
+      type: String,
+      default: "",
+    },
 
     adminId: {
       type: mongoose.Schema.Types.ObjectId,

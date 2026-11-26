@@ -1,5 +1,13 @@
 const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
+
 const Complex = require("../models/Complex");
+const User = require("../models/User");
+
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
 
 const isValidTime = (time) => {
   return typeof time === "string" && /^([01]\d|2[0-3]):([0-5]\d)$/.test(time);
@@ -18,21 +26,92 @@ const isValidDate = (date) => {
   );
 };
 
-// Only allow the logged-in admin to access their own complex.
+const escapeRegex = (value) => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+// Verify active complex admin
+const findActiveAdmin = async (userId) => {
+  if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+    return null;
+  }
+
+  return User.findOne({
+    _id: userId,
+    role: "complex_admin",
+    isActive: true,
+  }).select("_id");
+};
+
+// Only allow admin to access their own complex
 const findOwnedComplex = async (complexId, userId) => {
   if (!mongoose.Types.ObjectId.isValid(complexId)) {
     return null;
   }
 
+  const admin = await findActiveAdmin(userId);
+
+  if (!admin) {
+    return null;
+  }
+
   return Complex.findOne({
     _id: complexId,
-    adminId: userId,
+    adminId: admin._id,
   });
 };
 
-// 1. Create Complex
-exports.createComplex = async (req, res) => {
+// Get uploaded image path
+const getUploadedImage = (req) => {
+  return req.file ? `/uploads/complexes/${req.file.filename}` : "";
+};
+
+// Delete uploaded image safely
+const deleteUploadedImage = async (imagePath) => {
+  if (
+    typeof imagePath !== "string" ||
+    !/^\/uploads\/complexes\/complex-[a-zA-Z0-9-]+\.(jpg|png|webp)$/.test(
+      imagePath,
+    )
+  ) {
+    return;
+  }
+
   try {
+    const filePath = path.join(
+      __dirname,
+      "../../uploads/complexes",
+      path.basename(imagePath),
+    );
+
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error("Delete Image Error:", error.message);
+    }
+  }
+};
+
+// ==========================================
+// 1. CREATE COMPLEX WITH IMAGE
+// POST /api/complexes
+// ==========================================
+
+exports.createComplex = async (req, res) => {
+  const uploadedImage = getUploadedImage(req);
+
+  let saved = false;
+
+  try {
+    const admin = await findActiveAdmin(req.user?.userId);
+
+    if (!admin) {
+      return res.status(403).json({
+        success: false,
+        message: "Complex admin access required",
+      });
+    }
+
     const {
       name,
       ownerName,
@@ -45,10 +124,37 @@ exports.createComplex = async (req, res) => {
       closingTime,
     } = req.body;
 
-    if (!name || !ownerName || !phone || !address || !city) {
+    const requiredFields = [name, ownerName, phone, address, city];
+
+    const isValid = requiredFields.every(
+      (value) => typeof value === "string" && value.trim().length > 0,
+    );
+
+    if (!isValid) {
       return res.status(400).json({
         success: false,
         message: "Name, owner, phone, address and city are required",
+      });
+    }
+
+    if (email !== undefined && typeof email !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email",
+      });
+    }
+
+    if (description !== undefined && typeof description !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid description",
+      });
+    }
+
+    if (!uploadedImage) {
+      return res.status(400).json({
+        success: false,
+        message: "Complex image is required",
       });
     }
 
@@ -71,21 +177,40 @@ exports.createComplex = async (req, res) => {
 
     const complex = await Complex.create({
       name: name.trim(),
+
       ownerName: ownerName.trim(),
+
       phone: phone.trim(),
-      email: email?.trim().toLowerCase(),
+
+      email: email?.trim().toLowerCase() || undefined,
+
       address: address.trim(),
+
       city: city.trim(),
-      description: description || "",
+
+      description: description?.trim() || "",
+
       openingTime: open,
+
       closingTime: close,
-      adminId: req.user.userId,
+
+      image: uploadedImage,
+
+      adminId: admin._id,
+
+      isActive: true,
     });
+
+    saved = true;
 
     return res.status(201).json({
       success: true,
+
       message: "Complex created successfully",
-      data: { complex },
+
+      data: {
+        complex,
+      },
     });
   } catch (error) {
     console.error("Create Complex Error:", error);
@@ -94,10 +219,19 @@ exports.createComplex = async (req, res) => {
       success: false,
       message: "Unable to create complex",
     });
+  } finally {
+    // Delete image if database save failed
+    if (!saved && uploadedImage) {
+      await deleteUploadedImage(uploadedImage);
+    }
   }
 };
 
-// 2. Get active complexes (Customer/public listing)
+// ==========================================
+// 2. GET ALL ACTIVE COMPLEXES
+// GET /api/complexes
+// ==========================================
+
 exports.getAllComplexes = async (req, res) => {
   try {
     const { city, search } = req.query;
@@ -107,16 +241,22 @@ exports.getAllComplexes = async (req, res) => {
     };
 
     if (city) {
-      filter.city = new RegExp(`^${city}$`, "i");
+      filter.city = new RegExp(`^${escapeRegex(city)}$`, "i");
     }
 
     if (search) {
-      const safeSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const safeSearch = escapeRegex(search);
 
       filter.$or = [
-        { name: new RegExp(safeSearch, "i") },
-        { city: new RegExp(safeSearch, "i") },
-        { address: new RegExp(safeSearch, "i") },
+        {
+          name: new RegExp(safeSearch, "i"),
+        },
+        {
+          city: new RegExp(safeSearch, "i"),
+        },
+        {
+          address: new RegExp(safeSearch, "i"),
+        },
       ];
     }
 
@@ -126,8 +266,12 @@ exports.getAllComplexes = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+
       count: complexes.length,
-      data: { complexes },
+
+      data: {
+        complexes,
+      },
     });
   } catch (error) {
     console.error("Get Complexes Error:", error);
@@ -139,17 +283,36 @@ exports.getAllComplexes = async (req, res) => {
   }
 };
 
-// 3. Get complexes assigned to logged-in admin
+// ==========================================
+// 3. GET LOGGED-IN ADMIN COMPLEXES
+// GET /api/complexes/my
+// ==========================================
+
 exports.getMyComplexes = async (req, res) => {
   try {
+    const admin = await findActiveAdmin(req.user?.userId);
+
+    if (!admin) {
+      return res.status(403).json({
+        success: false,
+        message: "Complex admin access required",
+      });
+    }
+
     const complexes = await Complex.find({
-      adminId: req.user.userId,
-    }).sort({ createdAt: -1 });
+      adminId: admin._id,
+    }).sort({
+      createdAt: -1,
+    });
 
     return res.status(200).json({
       success: true,
+
       count: complexes.length,
-      data: { complexes },
+
+      data: {
+        complexes,
+      },
     });
   } catch (error) {
     console.error("Get My Complexes Error:", error);
@@ -161,10 +324,16 @@ exports.getMyComplexes = async (req, res) => {
   }
 };
 
-// 4. Get single active complex
+// ==========================================
+// 4. GET SINGLE ACTIVE COMPLEX
+// GET /api/complexes/:id
+// ==========================================
+
 exports.getComplexById = async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid complex ID",
@@ -172,7 +341,7 @@ exports.getComplexById = async (req, res) => {
     }
 
     const complex = await Complex.findOne({
-      _id: req.params.id,
+      _id: id,
       isActive: true,
     });
 
@@ -185,7 +354,10 @@ exports.getComplexById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: { complex },
+
+      data: {
+        complex,
+      },
     });
   } catch (error) {
     console.error("Get Complex Error:", error);
@@ -197,10 +369,18 @@ exports.getComplexById = async (req, res) => {
   }
 };
 
-// 5. Update own complex
+// ==========================================
+// 5. UPDATE COMPLEX WITH IMAGE
+// PUT /api/complexes/:id
+// ==========================================
+
 exports.updateComplex = async (req, res) => {
+  const uploadedImage = getUploadedImage(req);
+
+  let saved = false;
+
   try {
-    const complex = await findOwnedComplex(req.params.id, req.user.userId);
+    const complex = await findOwnedComplex(req.params.id, req.user?.userId);
 
     if (!complex) {
       return res.status(404).json({
@@ -208,6 +388,8 @@ exports.updateComplex = async (req, res) => {
         message: "Complex not found or access denied",
       });
     }
+
+    const oldImage = complex.image;
 
     const allowedFields = [
       "name",
@@ -221,14 +403,31 @@ exports.updateComplex = async (req, res) => {
       "closingTime",
     ];
 
-    allowedFields.forEach((field) => {
+    for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
-        complex[field] =
-          typeof req.body[field] === "string"
-            ? req.body[field].trim()
-            : req.body[field];
+        if (typeof req.body[field] !== "string") {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid ${field}`,
+          });
+        }
+
+        complex[field] = req.body[field].trim();
       }
-    });
+    }
+
+    const requiredFields = ["name", "ownerName", "phone", "address", "city"];
+
+    const hasEmptyField = requiredFields.some(
+      (field) => !complex[field]?.trim(),
+    );
+
+    if (hasEmptyField) {
+      return res.status(400).json({
+        success: false,
+        message: "Required fields cannot be empty",
+      });
+    }
 
     if (req.body.email !== undefined) {
       complex.email = req.body.email.trim().toLowerCase();
@@ -251,12 +450,28 @@ exports.updateComplex = async (req, res) => {
       });
     }
 
+    // Replace image only if new image is uploaded
+    if (uploadedImage) {
+      complex.image = uploadedImage;
+    }
+
     await complex.save();
+
+    saved = true;
+
+    // Delete old image after successful update
+    if (uploadedImage && oldImage && oldImage !== uploadedImage) {
+      await deleteUploadedImage(oldImage);
+    }
 
     return res.status(200).json({
       success: true,
+
       message: "Complex updated successfully",
-      data: { complex },
+
+      data: {
+        complex,
+      },
     });
   } catch (error) {
     console.error("Update Complex Error:", error);
@@ -265,10 +480,19 @@ exports.updateComplex = async (req, res) => {
       success: false,
       message: "Unable to update complex",
     });
+  } finally {
+    // Remove new image if update failed
+    if (!saved && uploadedImage) {
+      await deleteUploadedImage(uploadedImage);
+    }
   }
 };
 
-// 6. Active / Inactive complex
+// ==========================================
+// 6. ACTIVATE / DEACTIVATE COMPLEX
+// PATCH /api/complexes/:id/status
+// ==========================================
+
 exports.updateComplexStatus = async (req, res) => {
   try {
     const { isActive } = req.body;
@@ -280,7 +504,7 @@ exports.updateComplexStatus = async (req, res) => {
       });
     }
 
-    const complex = await findOwnedComplex(req.params.id, req.user.userId);
+    const complex = await findOwnedComplex(req.params.id, req.user?.userId);
 
     if (!complex) {
       return res.status(404).json({
@@ -290,12 +514,17 @@ exports.updateComplexStatus = async (req, res) => {
     }
 
     complex.isActive = isActive;
+
     await complex.save();
 
     return res.status(200).json({
       success: true,
+
       message: `Complex ${isActive ? "activated" : "deactivated"} successfully`,
-      data: { complex },
+
+      data: {
+        complex,
+      },
     });
   } catch (error) {
     console.error("Update Complex Status Error:", error);
@@ -307,7 +536,10 @@ exports.updateComplexStatus = async (req, res) => {
   }
 };
 
-// 7. Add unavailable date range
+// ==========================================
+// 7. ADD UNAVAILABLE DATE RANGE
+// ==========================================
+
 exports.addUnavailableDates = async (req, res) => {
   try {
     const { fromDate, toDate, reason } = req.body;
@@ -326,7 +558,7 @@ exports.addUnavailableDates = async (req, res) => {
       });
     }
 
-    const complex = await findOwnedComplex(req.params.id, req.user.userId);
+    const complex = await findOwnedComplex(req.params.id, req.user?.userId);
 
     if (!complex) {
       return res.status(404).json({
@@ -335,7 +567,6 @@ exports.addUnavailableDates = async (req, res) => {
       });
     }
 
-    // Prevent overlapping unavailable ranges.
     const hasOverlap = complex.unavailableRanges.some((range) => {
       return fromDate <= range.toDate && toDate >= range.fromDate;
     });
@@ -357,7 +588,9 @@ exports.addUnavailableDates = async (req, res) => {
 
     return res.status(201).json({
       success: true,
+
       message: "Unavailable dates added successfully",
+
       data: {
         unavailableRanges: complex.unavailableRanges,
       },
@@ -372,10 +605,13 @@ exports.addUnavailableDates = async (req, res) => {
   }
 };
 
-// 8. Remove unavailable date range
+// ==========================================
+// 8. REMOVE UNAVAILABLE DATE RANGE
+// ==========================================
+
 exports.removeUnavailableDates = async (req, res) => {
   try {
-    const complex = await findOwnedComplex(req.params.id, req.user.userId);
+    const complex = await findOwnedComplex(req.params.id, req.user?.userId);
 
     if (!complex) {
       return res.status(404).json({
@@ -394,11 +630,14 @@ exports.removeUnavailableDates = async (req, res) => {
     }
 
     range.deleteOne();
+
     await complex.save();
 
     return res.status(200).json({
       success: true,
+
       message: "Unavailable date range removed successfully",
+
       data: {
         unavailableRanges: complex.unavailableRanges,
       },

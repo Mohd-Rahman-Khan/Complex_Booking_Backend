@@ -1,12 +1,30 @@
-const {
-  timeToMinutes,
-  getDateDay,
-  getActiveIntervals,
-} = require("./availabilityUtils");
+const { timeToMinutes, getDateDay } = require("./availabilityUtils");
 
 const roundAmount = (amount) => {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 };
+
+// ==========================================
+// VALIDATE HOURLY RATE
+// ==========================================
+
+const validateRate = (value, fieldName) => {
+  if (value === undefined || value === null || value === "") {
+    throw new Error(`${fieldName} is not configured`);
+  }
+
+  const rate = Number(value);
+
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new Error(`Invalid ${fieldName}`);
+  }
+
+  return rate;
+};
+
+// ==========================================
+// CALCULATE DYNAMIC BOOKING PRICE
+// ==========================================
 
 const calculateBookingPrice = ({
   sport,
@@ -15,85 +33,226 @@ const calculateBookingPrice = ({
   end,
   gstPercentage = 18,
 }) => {
+  // Validate sport
   if (!sport) {
     throw new Error("Sport details are required");
   }
 
-  const pricing = sport.pricing || {};
-  const intervals = getActiveIntervals(sport);
+  // Validate booking time
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end > 1440 ||
+    end <= start
+  ) {
+    throw new Error("Invalid booking time range");
+  }
 
-  const weekendDays = pricing.weekendDays || [0, 6];
+  if (!Number.isFinite(gstPercentage) || gstPercentage < 0) {
+    throw new Error("Invalid GST percentage");
+  }
+
+  // Get pricing from embedded sport
+  const pricing = sport.pricing;
+
+  if (!pricing) {
+    throw new Error("Sport pricing is not configured");
+  }
+
+  // ==========================================
+  // 1. WEEKDAY AND WEEKEND PRICING
+  // ==========================================
+
+  const weekendDays = Array.isArray(pricing.weekendDays)
+    ? pricing.weekendDays
+    : [0, 6];
+
   const day = getDateDay(bookingDate);
+
+  if (!Number.isInteger(day) || day < 0 || day > 6) {
+    throw new Error("Invalid booking date");
+  }
+
   const isWeekend = weekendDays.includes(day);
 
-  const normalRate = Number(
-    isWeekend ? pricing.weekendPrice || 0 : pricing.weekdayPrice || 0,
+  // Validate all configured rates
+  const weekdayNormalRate = validateRate(
+    pricing.weekdayPrice,
+    "Weekday normal price",
   );
 
-  const peakDefaultRate = Number(
-    isWeekend ? pricing.weekendPeakPrice || 0 : pricing.weekdayPeakPrice || 0,
+  const weekdayPeakRate = validateRate(
+    pricing.weekdayPeakPrice,
+    "Weekday peak price",
   );
 
-  const peakHours = (pricing.peakHours || []).map((item) => ({
-    start: timeToMinutes(item.startTime),
-    end: timeToMinutes(item.endTime),
-    price: Number(item.price || 0),
-  }));
+  const weekendNormalRate = validateRate(
+    pricing.weekendPrice,
+    "Weekend normal price",
+  );
+
+  const weekendPeakRate = validateRate(
+    pricing.weekendPeakPrice,
+    "Weekend peak price",
+  );
+
+  // ==========================================
+  // 2. CONFIGURED PEAK HOURS
+  // ==========================================
+
+  const peakHours = (
+    Array.isArray(pricing.peakHours) ? pricing.peakHours : []
+  ).map((item) => {
+    const peakStart = timeToMinutes(item.startTime);
+    const peakEnd = timeToMinutes(item.endTime);
+
+    if (
+      !Number.isInteger(peakStart) ||
+      !Number.isInteger(peakEnd) ||
+      peakStart < 0 ||
+      peakStart >= 1440 ||
+      peakEnd < 0 ||
+      peakEnd > 1440 ||
+      peakStart === peakEnd
+    ) {
+      throw new Error("Invalid peak hour configuration");
+    }
+
+    return {
+      start: peakStart,
+      end: peakEnd,
+    };
+  });
+
+  // Check whether a particular minute is peak time
+  const isPeakMinute = (minute) => {
+    return peakHours.some((peak) => {
+      // Normal peak range
+      // Example: 18:00 - 21:00
+      if (peak.start < peak.end) {
+        return minute >= peak.start && minute < peak.end;
+      }
+
+      // Overnight peak range
+      // Example: 22:00 - 02:00
+      return minute >= peak.start || minute < peak.end;
+    });
+  };
+
+  // ==========================================
+  // 3. CALCULATE DYNAMIC PRICE
+  // ==========================================
 
   let baseAmount = 0;
 
-  // Calculate in 15-minute segments.
-  for (let minute = start; minute < end; minute += 15) {
-    const segmentEnd = minute + 15;
+  const breakdown = [];
 
-    const activeSlot = intervals.find(
-      (item) => item.start <= minute && item.end >= segmentEnd,
-    );
-
-    if (!activeSlot) {
-      throw new Error("Requested time is outside configured slots");
-    }
-
-    const peak = peakHours.find(
-      (item) =>
-        item.start !== null &&
-        item.end !== null &&
-        item.start < item.end &&
-        minute < item.end &&
-        segmentEnd > item.start,
-    );
+  // Calculate minute-by-minute for accurate pricing
+  for (let minute = start; minute < end; minute += 1) {
+    const isPeak = isPeakMinute(minute);
 
     let hourlyRate;
+    let label;
 
-    if (peak && peak.price > 0) {
-      hourlyRate = peak.price;
-    } else if (peakDefaultRate > 0 && peak) {
-      hourlyRate = peakDefaultRate;
-    } else if (normalRate > 0) {
-      hourlyRate = normalRate;
+    if (isWeekend && isPeak) {
+      hourlyRate = weekendPeakRate;
+      label = "Weekend Peak";
+    } else if (isWeekend) {
+      hourlyRate = weekendNormalRate;
+      label = "Weekend Normal";
+    } else if (isPeak) {
+      hourlyRate = weekdayPeakRate;
+      label = "Weekday Peak";
     } else {
-      const slotDuration =
-        Number(activeSlot.slot.duration) || activeSlot.end - activeSlot.start;
-
-      hourlyRate = (Number(activeSlot.slot.price || 0) / slotDuration) * 60;
+      hourlyRate = weekdayNormalRate;
+      label = "Weekday Normal";
     }
 
-    baseAmount += (hourlyRate * 15) / 60;
+    // Price for one minute
+    const minuteAmount = hourlyRate / 60;
+
+    baseAmount += minuteAmount;
+
+    // Group consecutive minutes having the same rate
+    const last = breakdown[breakdown.length - 1];
+
+    if (
+      last &&
+      last.label === label &&
+      last.hourlyRate === hourlyRate &&
+      last.endMinutes === minute
+    ) {
+      last.endMinutes = minute + 1;
+      last.durationMinutes += 1;
+    } else {
+      breakdown.push({
+        label,
+        startMinutes: minute,
+        endMinutes: minute + 1,
+        durationMinutes: 1,
+        hourlyRate,
+        isPeak,
+        isWeekend,
+      });
+    }
   }
 
-  baseAmount = roundAmount(baseAmount);
+  // ==========================================
+  // 4. FORMAT PRICE BREAKDOWN
+  // ==========================================
 
+  const formatTime = (minutes) => {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+
+    return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+  };
+
+  const priceBreakdown = breakdown.map((item) => ({
+    ...item,
+
+    startTime: formatTime(item.startMinutes),
+
+    endTime: formatTime(item.endMinutes),
+
+    amount: roundAmount((item.hourlyRate * item.durationMinutes) / 60),
+  }));
+
+  // ==========================================
+  // 5. FINAL AMOUNT CALCULATION
+  // ==========================================
+
+  baseAmount = roundAmount(
+    priceBreakdown.reduce((sum, item) => sum + item.amount, 0),
+  );
+
+  // Coupon functionality can be added later
   const discountAmount = 0;
-  const taxableAmount = Math.max(0, baseAmount - discountAmount);
+
+  const taxableAmount = roundAmount(Math.max(0, baseAmount - discountAmount));
+
   const gstAmount = roundAmount((taxableAmount * gstPercentage) / 100);
+
   const totalAmount = roundAmount(taxableAmount + gstAmount);
+
+  // ==========================================
+  // 6. RETURN FINAL PRICE
+  // ==========================================
 
   return {
     baseAmount,
     discountAmount,
+    taxableAmount,
     gstPercentage,
     gstAmount,
     totalAmount,
+
+    durationMinutes: end - start,
+
+    isWeekend,
+
+    breakdown: priceBreakdown,
   };
 };
 

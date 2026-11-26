@@ -1,9 +1,9 @@
 const express = require("express");
+
 const router = express.Router();
 
-const availabilityController = require("../controllers/availabilityController");
+const { getAvailability } = require("../controllers/availabilityController");
 
-// Public availability lookup
-router.get("/:complexId/:sportId", availabilityController.getAvailability);
+router.get("/:complexId/:sportId", getAvailability);
 
 module.exports = router;

@@ -56,6 +56,15 @@ const bookingSchema = new mongoose.Schema(
         type: Number,
         required: true,
       },
+      groundAmount: {
+        type: Number,
+        default: 0,
+      },
+
+      coachAmount: {
+        type: Number,
+        default: 0,
+      },
 
       discountAmount: {
         type: Number,
@@ -83,6 +92,34 @@ const bookingSchema = new mongoose.Schema(
       ref: "Coupon",
       default: null,
     },
+    coachId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Coach",
+      default: null,
+      index: true,
+    },
+
+    coachDetails: {
+      name: {
+        type: String,
+        default: "",
+      },
+
+      specialization: {
+        type: String,
+        default: "",
+      },
+
+      hourlyFee: {
+        type: Number,
+        default: 0,
+      },
+
+      amount: {
+        type: Number,
+        default: 0,
+      },
+    },
 
     paymentStatus: {
       type: String,
@@ -102,7 +139,7 @@ const bookingSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["pending", "confirmed", "cancelled", "completed", "rejected"],
+      enum: ["confirmed", "cancelled"],
       default: "pending",
       index: true,
     },
@@ -125,6 +162,9 @@ const bookingSchema = new mongoose.Schema(
 bookingSchema.index({
   complexId: 1,
   sportId: 1,
+  bookingDate: 1,
+  status: 1,
+  coachId: 1,
   bookingDate: 1,
   status: 1,
 });
